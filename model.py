@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from hypergrad import SGDHD, SGDHDN, AdamHD, AdamHDN
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -260,7 +262,7 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def configure_optimizers(self, opt_name, weight_decay, learning_rate, hyper_lr, betas, device_type):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
@@ -277,12 +279,30 @@ class GPT(nn.Module):
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
         print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
         print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-        # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
+        if opt_name == 'adamw':
+            # Create AdamW optimizer and use the fused version if it is available
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and device_type == 'cuda'
+            extra_args = dict(fused=True) if use_fused else dict()
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+            print(f"using fused AdamW: {use_fused}")
+        elif opt_name == 'adam':
+            optimizer = torch.optim.Adam(optim_groups, lr=learning_rate, betas=betas)
+        elif opt_name == 'sgd':
+            optimizer = torch.optim.SGD(optim_groups, lr=learning_rate)
+            print("using optimizer: SGD")
+        elif opt_name == 'sgdm':
+            optimizer = torch.optim.SGD(optim_groups, lr=learning_rate, momentum=0.9, nesterov=True)
+        elif opt_name == 'sgd_hd':
+            optimizer = SGDHD(optim_groups, lr=learning_rate, hypergrad_lr=hyper_lr)
+        elif opt_name == 'sgd_hdn':
+            optimizer = SGDHDN(optim_groups, lr=learning_rate, hypergrad_lr=hyper_lr)
+        elif opt_name == 'adam_hd':
+            optimizer = AdamHD(optim_groups, lr=learning_rate, betas=betas, hypergrad_lr=hyper_lr)
+        elif opt_name == 'adam_hdn':
+            optimizer = AdamHDN(optim_groups, lr=learning_rate, betas=betas, hypergrad_lr=hyper_lr)
+        else:
+            raise ValueError(f"Optimizer {opt_name} is not available.")
 
         return optimizer
 

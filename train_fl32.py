@@ -60,7 +60,7 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 opt_name = 'adamw'
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
-weight_decay = 1e-4
+weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
@@ -74,7 +74,7 @@ hyper_lr = 0.0
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+dtype = 'float32'
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -268,38 +268,53 @@ def log_func(epoch, iteration, time_spent, loss, loss_epoch, valid_loss):
         writer.writerow([epoch, iteration, time_spent, loss, loss_epoch, valid_loss])
     print('{} | {} | Epoch: {} | Iter: {} | Time: {:.3f} | Loss: {:.3f} | Valid. loss: {:.3f}'.format(
         wandb_project, opt_name, epoch, iteration, time_spent, loss, valid_loss))
-                    
-# training loop
-X, Y = get_batch('train') # fetch the very first batch
-t0 = time.time()
-local_iter_num = 0 # number of iterations in the lifetime of this process
-raw_model = model.module if ddp else model # unwrap DDP container if needed
-running_mfu = -1.0
+                
+ctx = nullcontext()
+print("Mixed precision disabled, using float32.")
 
+scaler = None
+
+def closure():
+    optimizer.zero_grad(set_to_none=True)
+    total_loss = 0.0
+    for micro_step in range(gradient_accumulation_steps):
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+        with ctx:
+            logits, loss = model(X, Y)
+            loss = loss / gradient_accumulation_steps
+        total_loss += loss.item()
+        loss.backward()
+    if grad_clip != 0.0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    return total_loss
+
+# training loop
+X, Y = get_batch('train')
+t0 = time.time()
+local_iter_num = 0
+raw_model = model.module if ddp else model
+running_mfu = -1.0
 time_start = time.time()
 epoch = 0
 
 while True:
-    # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-    # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
-        
         losses = estimate_loss()
-        # print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
                 "lr": lr,
-                "mfu": running_mfu*100, # convert to percentage
+                "mfu": running_mfu * 100,
             })
-
-        log_func(epoch, iter_num, time.time() - time_start, losses['train'].item(), losses['train'].item(), losses['val'].item())
+        log_func(epoch, iter_num, time.time() - time_start,
+                 losses['train'].item(), losses['train'].item(), losses['val'].item())
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
@@ -319,50 +334,24 @@ while True:
     if iter_num == 0 and eval_only:
         break
 
-    # forward backward update, with optional gradient accumulation to simulate larger batch size
-    # and using the GradScaler if data type is float16
-    for micro_step in range(gradient_accumulation_steps):
-        if ddp:
-            # in DDP training we only need to sync gradients at the last micro step.
-            # the official way to do this is with model.no_sync() context manager, but
-            # I really dislike that this bloats the code and forces us to repeat code
-            # looking at the source of that context manager, it just toggles this variable
-            model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
-        with ctx:
-            logits, loss = model(X, Y)
-            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
-        # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
-    # clip the gradient
-    if grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    # step the optimizer and scaler if training in fp16
-    scaler.step(optimizer)
-    scaler.update()
-    # flush the gradients as soon as we can, no need for this memory anymore
-    optimizer.zero_grad(set_to_none=True)
+    total_loss = optimizer.step(closure)
 
-    # timing and logging
+    X, Y = get_batch('train')
+
+    # logging
     t1 = time.time()
     dt = t1 - t0
     t0 = t1
     if iter_num % log_interval == 0 and master_process:
-        # get loss as float. note: this is a CPU-GPU sync point
-        # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() * gradient_accumulation_steps
-        if local_iter_num >= 5: # let the training loop settle a bit
+        lossf = total_loss
+        if local_iter_num >= 5:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
-            running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        # print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+            running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+        log_func(epoch, iter_num, time.time() - time_start, lossf, float('nan'), float('nan'))
 
-        log_func(epoch, iter_num, time.time() - time_start, loss.item(), float('nan'), float('nan'))
     iter_num += 1
     local_iter_num += 1
 
-    # termination conditions
     if iter_num > max_iters:
         break
 
