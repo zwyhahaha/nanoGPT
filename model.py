@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from hypergrad import SGDHD, SGDHDN, AdamHD, AdamHDN
+from hypergrad import SGDHD, SGDHDN, AdamHD, AdamHDN, SGDMHDN
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -272,7 +272,7 @@ class GPT(nn.Module):
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': decay_params, 'weight_decay': 0.0},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
@@ -297,6 +297,12 @@ class GPT(nn.Module):
             optimizer = SGDHD(optim_groups, lr=learning_rate, hypergrad_lr=hyper_lr)
         elif opt_name == 'sgd_hdn':
             optimizer = SGDHDN(optim_groups, lr=learning_rate, hypergrad_lr=hyper_lr)
+        elif opt_name == 'sgd_hdn_adagrad':
+            optimizer = SGDHDN(optim_groups, lr=learning_rate, hypergrad_lr=hyper_lr, online_optimizer='adagrad')
+        elif opt_name == 'sgd_hdn_adam':
+            optimizer = SGDHDN(optim_groups, lr=learning_rate, hypergrad_lr=hyper_lr, online_optimizer='adam')
+        elif opt_name == 'sgdm_hdn':
+            optimizer = SGDMHDN(optim_groups, lr=learning_rate, hypergrad_lr=hyper_lr, online_optimizer='decay')
         elif opt_name == 'adam_hd':
             optimizer = AdamHD(optim_groups, lr=learning_rate, betas=betas, hypergrad_lr=hyper_lr)
         elif opt_name == 'adam_hdn':

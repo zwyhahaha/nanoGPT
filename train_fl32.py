@@ -263,12 +263,12 @@ if csv_log and writer:
     writer = csv.writer(f)
     writer.writerow(['Epoch', 'Iteration', 'Time', 'Loss', 'LossEpoch', 'ValidLossEpoch'])
 
-def log_func(epoch, iteration, time_spent, loss, loss_epoch, valid_loss):
+def log_func(epoch, iteration, time_spent, loss, loss_epoch, valid_loss, lr):
     if csv_log and writer:
-        writer.writerow([epoch, iteration, time_spent, loss, loss_epoch, valid_loss])
-    print('{} | {} | Epoch: {} | Iter: {} | Time: {:.3f} | Loss: {:.3f} | Valid. loss: {:.3f}'.format(
-        wandb_project, opt_name, epoch, iteration, time_spent, loss, valid_loss))
-                
+        writer.writerow([epoch, iteration, time_spent, loss, loss_epoch, valid_loss, lr])
+    print('{} | {} | Epoch: {} | Iter: {} | Time: {:.3f} | Loss: {:.3f} | Valid. loss: {:.3f} | Alpha: {:.3f}'.format(
+        wandb_project, opt_name, epoch, iteration, time_spent, loss, valid_loss, lr))
+    
 ctx = nullcontext()
 print("Mixed precision disabled, using float32.")
 
@@ -310,11 +310,11 @@ while True:
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
-                "lr": lr,
+                "lr":  optimizer.param_groups[0]['lr'],
                 "mfu": running_mfu * 100,
             })
         log_func(epoch, iter_num, time.time() - time_start,
-                 losses['train'].item(), losses['train'].item(), losses['val'].item())
+                 losses['train'].item(), losses['train'].item(), losses['val'].item(), optimizer.param_groups[0]['lr'])
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
@@ -347,7 +347,7 @@ while True:
         if local_iter_num >= 5:
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-        log_func(epoch, iter_num, time.time() - time_start, lossf, float('nan'), float('nan'))
+        log_func(epoch, iter_num, time.time() - time_start, lossf, float('nan'), float('nan'), optimizer.param_groups[0]['lr'])
 
     iter_num += 1
     local_iter_num += 1

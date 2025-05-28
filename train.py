@@ -60,10 +60,10 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 opt_name = 'adamw'
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
-weight_decay = 1e-4
+weight_decay = 0.0 #1e-4
 beta1 = 0.9
 beta2 = 0.95
-grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+grad_clip = 0.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
@@ -263,11 +263,11 @@ if csv_log and writer:
     writer = csv.writer(f)
     writer.writerow(['Epoch', 'Iteration', 'Time', 'Loss', 'LossEpoch', 'ValidLossEpoch'])
 
-def log_func(epoch, iteration, time_spent, loss, loss_epoch, valid_loss):
+def log_func(epoch, iteration, time_spent, loss, loss_epoch, valid_loss, lr):
     if csv_log and writer:
-        writer.writerow([epoch, iteration, time_spent, loss, loss_epoch, valid_loss])
-    print('{} | {} | Epoch: {} | Iter: {} | Time: {:.3f} | Loss: {:.3f} | Valid. loss: {:.3f}'.format(
-        wandb_project, opt_name, epoch, iteration, time_spent, loss, valid_loss))
+        writer.writerow([epoch, iteration, time_spent, loss, loss_epoch, valid_loss, lr])
+    print('{} | {} | Epoch: {} | Iter: {} | Time: {:.3f} | Loss: {:.3f} | Valid. loss: {:.3f} | Alpha: {:.3f}'.format(
+        wandb_project, opt_name, epoch, iteration, time_spent, loss, valid_loss, lr))
                     
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -295,11 +295,11 @@ while True:
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
-                "lr": lr,
+                "lr": optimizer.param_groups[0]['lr'],
                 "mfu": running_mfu*100, # convert to percentage
             })
 
-        log_func(epoch, iter_num, time.time() - time_start, losses['train'].item(), losses['train'].item(), losses['val'].item())
+        log_func(epoch, iter_num, time.time() - time_start, losses['train'].item(), losses['train'].item(), losses['val'].item(), lr.item())
 
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
@@ -358,7 +358,7 @@ while True:
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         # print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
 
-        log_func(epoch, iter_num, time.time() - time_start, loss.item(), float('nan'), float('nan'))
+        log_func(epoch, iter_num, time.time() - time_start, loss.item(), float('nan'), float('nan'), optimizer.param_groups[0]['lr'].item())
     iter_num += 1
     local_iter_num += 1
 
